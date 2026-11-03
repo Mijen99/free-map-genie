@@ -145,19 +145,6 @@ class BackendService {
     this.accountLoggedIn = true;
   }
 
-  public async importFromMapgenieAccount(key: Key) {
-    if (!(await this.isLoggedIn())) {
-      throw new Error("User is not logged in");
-    }
-
-    const user = await this.mapgenie.fetchUser(key.gameId);
-    await this.writes.run("account-import", async () => {
-      await this.backup(key.userId, [key.gameId], "account-import");
-      await this.database.importMapgenie(key, user);
-    });
-    this.cloudSync.schedulePush(key);
-  }
-
   public async importAccountData(key: Key, data: UserData) {
     const validated = UserDataSchema.parse(data);
     await this.writes.run("account-import", async () => {

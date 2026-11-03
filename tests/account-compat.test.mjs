@@ -23,6 +23,7 @@ const { default: Backend } = await load("../src/services/backend.service.ts", {
   nanoid: "export const nanoid = () => 'id';",
   "@/common/storage/databases": "export class DexieDatabase { constructor() { return globalThis.db; } }",
   "@/common/storage/migrator": "export class Migrator {}",
+  "@/common/storage/cloud/sync": "export class CloudSync { schedulePush() {} async pushNow() {} }",
   "@/common/messaging": "export const createService = ({context}) => context;",
   "@/common/mapgenie": "export const getAuthToken = () => globalThis.token; export const setAuthToken = (v) => globalThis.token = v;",
   "./mapgenie.service": "export default {use: () => globalThis.api};",
