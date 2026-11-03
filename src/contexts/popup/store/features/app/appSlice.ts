@@ -68,6 +68,11 @@ export const fetchLatestVersionAsync = createAppAsyncThunk<string>(
       url.pathname = "/repos" + pathname + "/releases/latest";
 
       const res = await fetch(url.toString());
+
+      // A repository with no published releases answers 404. That isn't a
+      // failure, there is just nothing newer to offer.
+      if (res.status === 404) return selectAppVersion(getState());
+
       const json: {
         tag_name: string;
       } = await res.json();
