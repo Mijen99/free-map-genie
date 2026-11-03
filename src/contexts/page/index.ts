@@ -10,6 +10,7 @@ import {
 import pageService from "@/services/page.service";
 import extensionService from "@/services/extension.service";
 import backendService from "@/services/backend.service";
+import { waitForPageAccount } from "@/common/mapgenie/account";
 
 import { HomePage } from "./pages/home";
 import { GameHomePage } from "./pages/game-home";
@@ -76,17 +77,6 @@ const fetchAccountName = async (id: number) => {
   }
 };
 
-const waitForPageUserId = async (timeout = 10000) => {
-  const deadline = Date.now() + timeout;
-  while (Date.now() < deadline) {
-    const user = window.user;
-    const id = user?.realId ?? user?.id;
-    if (typeof id === "number" && id >= 0) return id;
-    await new Promise((resolve) => setTimeout(resolve, 250));
-  }
-  return undefined;
-};
-
 const initializeBackendUserState = async (
   backend: backendService.Instance
 ) => {
@@ -94,21 +84,14 @@ const initializeBackendUserState = async (
     // Set auth token in backend service
     const auth = getAuthToken();
     await backend.setAuthToken(auth);
-    if (auth) {
-      await backend.updateUser();
-      return;
+    const account = await waitForPageAccount();
+    await backend.updateUser(account);
+    if (account && !account.name) {
+      // Name lookup is optional and must not delay the profile or map boot.
+      void fetchAccountName(account.id).then(async (name) => {
+        if (name) await backend.updateAccountName(account.id, name);
+      }).catch((err) => logger.debug("Could not read account name.", err));
     }
-
-    // MapGenie no longer renders the auth-token meta tag, so the account is
-    // identified from the page's own window.user. The profile is saved right
-    // away (so the popup sees it as early as possible) and renamed once the
-    // account name has been read.
-    const id = await waitForPageUserId();
-    if (id === undefined) return;
-    await backend.updateUser({ id });
-
-    const name = await fetchAccountName(id);
-    if (name) await backend.updateUser({ id, name });
   } catch (err) {
     logger.debug(
       "Could not refresh MapGenie account profile; continuing with local FMG data.",
@@ -131,7 +114,9 @@ export default defineUnlistedScript(async () => {
 
     if (!pageScript) return;
 
-    void initializeBackendUserState(backend);
+    // Resolve the real account before MapPage substitutes the local profile ID.
+    const accountReady = initializeBackendUserState(backend);
+    if (pageType === "map") await accountReady;
 
     // Reload if script was already injected
     checkReload();

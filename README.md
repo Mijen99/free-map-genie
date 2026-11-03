@@ -130,6 +130,35 @@ automatic showing on future loads and does not hide the current notes.
 
 This setting does not change note contents or add cloud synchronization.
 
+## Local Notes Setting
+
+Enable **Show Notes on Load** in the map's SETTINGS section to show notes
+automatically after loading a map. The option is off by default and saved
+locally per game. Enabling it also shows notes immediately. You can still
+hide notes manually during the session; disabling the option only stops
+automatic showing on future loads and does not hide the current notes.
+
+This setting does not change note contents or add cloud synchronization.
+
+## Local Data Safety
+
+- The popup footer reports pending, completed, or failed local writes. A failed
+  write remains flagged for the current backend session even if later writes succeed.
+- The page/info tab provides a diagnostic report with extension/browser versions,
+  map identity, storage availability and recent write error codes. It excludes
+  account names, tokens, note contents, and arbitrary URL parameters.
+- Data Manager's **Recovery points** view keeps up to five recent pre-operation
+  snapshots per profile. JSON/account import, clearing map/game data, and restore
+  create a snapshot first. If that fails, the destructive operation is cancelled.
+  A point being restored is protected from automatic cleanup during that operation.
+- Restoring a point replaces the listed games, not other games or profiles.
+  Recovery points are local site data, not external backups: clearing site data
+  removes them. Keep exported JSON files separately for durable backups.
+- After JSON import or recovery, **Reload map** refreshes the connected map.
+- Game metadata is cached locally, refreshed after an hour, and concurrent
+  requests share one network fetch. Missing JSON note descriptions default to an
+  empty string; other invalid fields are still rejected.
+
 ## Build
 
 This project uses WXT and yarn.
