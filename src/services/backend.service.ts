@@ -1,19 +1,84 @@
 import { nanoid } from "nanoid";
 import { DexieDatabase } from "@/common/storage/databases";
 import { Migrator } from "@/common/storage/migrator";
+import { CloudSync } from "@/common/storage/cloud/sync";
 import { createService, type ProxiedObject } from "@/common/messaging";
 import { getAuthToken, setAuthToken } from "@/common/mapgenie";
 
 import mapgenieService from "./mapgenie.service";
 
-import type { Key, UserData } from "@/common/storage";
+import { Key } from "@/common/storage";
+import type { UserData } from "@/common/storage";
 import type { Bookmark } from "@/common/bookmark";
+import type { CloudUser } from "@/common/firebase/auth";
 
 class BackendService {
   private readonly migrator = new Migrator();
   private readonly database = new DexieDatabase();
 
   private readonly mapgenie = mapgenieService.use();
+
+  // Mirrors the Dexie-backed data to Firestore, keyed by game, so it
+  // survives the local browser storage being cleared. See
+  // src/common/storage/cloud/sync.ts for the sync strategy.
+  private readonly cloudSync = new CloudSync(
+    (key) => this.database.getData(key),
+    (key, data) => this.database.setData(key, data),
+    (key) => this.database.categoryFilters.get(key),
+    (key, filters) => this.database.categoryFilters.set(key, filters)
+  );
+
+  public cloudIsConfigured() {
+    return this.cloudSync.isConfigured();
+  }
+
+  public cloudGetUser(): Promise<CloudUser | null> {
+    return this.cloudSync.getUser();
+  }
+
+  public async cloudSignUp(email: string, password: string) {
+    const user = await this.cloudSync.signUp(email, password);
+    await this.pushAllLocalDataToCloud();
+    return user;
+  }
+
+  public async cloudSignIn(email: string, password: string) {
+    const user = await this.cloudSync.signIn(email, password);
+    await this.pushAllLocalDataToCloud();
+    return user;
+  }
+
+  public async cloudSignInWithGoogle(accessToken: string) {
+    const user = await this.cloudSync.signInWithGoogle(accessToken);
+    await this.pushAllLocalDataToCloud();
+    return user;
+  }
+
+  // Right after linking/signing into a real account, push everything
+  // already stored locally, for every profile and every game, instead of
+  // waiting for the next edit. Otherwise data you already had before
+  // linking would just sit unsynced until you happened to mark something
+  // new. Each local profile (the real MapGenie account, plus any local
+  // Guest profiles) gets its own branch in the cloud, so this never mixes
+  // one profile's data into another's.
+  private async pushAllLocalDataToCloud() {
+    const profiles = await this.database.profiles.get();
+
+    await Promise.all(
+      profiles.map(async (profile) => {
+        const games = await this.database.export(profile.id);
+        await Promise.all(
+          Object.keys(games).map((gameId) =>
+            this.cloudSync.pushNow(new Key(Number(gameId), profile.id))
+          )
+        );
+      })
+    );
+  }
+
+  public cloudSignOut() {
+    return this.cloudSync.signOut();
+  }
 
   public getAuthToken() {
     return getAuthToken();
@@ -23,9 +88,9 @@ class BackendService {
     setAuthToken(token);
   }
 
-  public isLoggedIn() {
-    const authToken = this.getAuthToken();
-    return !!authToken;
+  public async isLoggedIn() {
+    if (this.getAuthToken()) return true;
+    return (await this.database.profiles.getUser()) !== null;
   }
 
   public storageEstimate() {
@@ -37,28 +102,29 @@ class BackendService {
   }
 
   public async storageRequestPersist() {
-    const permission = await navigator.permissions.query({
-      name: "persistent-storage",
-    });
+    const alreadyPersisted = await navigator.storage.persisted();
+    if (alreadyPersisted) return true;
 
-    if (permission.state === "granted") {
-      return navigator.storage.persist();
-    } else {
-      console.warn(
-        "Persistent storage permission not granted:",
-        permission.state
-      );
-      return false;
-    }
+    return navigator.storage.persist();
   }
 
   public async migrate(domain: string, key: Key) {
     await this.migrator.migrate(domain, key);
   }
 
-  public async updateUser() {
-    if (!this.isLoggedIn()) {
-      await this.database.profiles.deleteUser();
+  public async updateUser(pageUser?: { id: number; name?: string }) {
+    if (!this.getAuthToken()) {
+      // Without a token the account can't be looked up, but the id the page
+      // itself reports is enough to keep a local profile for it. With
+      // neither, leave whatever is stored alone: we can't tell logged out
+      // from a page that just doesn't expose the user.
+      if (pageUser) {
+        const existing = await this.database.profiles.getUser();
+        const name =
+          pageUser.name ??
+          (existing?.id === pageUser.id ? existing.name : "MapGenie account");
+        await this.database.profiles.replaceUser(pageUser.id, name);
+      }
       return;
     }
 
@@ -67,13 +133,22 @@ class BackendService {
     await this.database.profiles.replaceUser(userData.id, userData.username);
   }
 
-  public async importFromMapgenieAccount(key: Key) {
-    if (!this.isLoggedIn()) {
-      throw new Error("User is not logged in");
+  public async importAccountData(
+    key: Key,
+    data: {
+      locations: number[];
+      trackedCategoryIds: number[];
+      notes: MG.Note[];
     }
-
-    const user = await this.mapgenie.fetchUser(key.gameId);
-    await this.database.importMapgenie(key, user);
+  ) {
+    await this.database.setData(key, {
+      locations: Object.fromEntries(data.locations.map((id) => [id, true])),
+      trackedCategoryIds: data.trackedCategoryIds,
+      notes: data.notes,
+      presetOrdering: [],
+      presets: [],
+    });
+    this.cloudSync.schedulePush(key);
   }
 
   public async import(games: Record<number, UserData>) {
@@ -82,7 +157,12 @@ class BackendService {
       throw new Error("No active user profile found");
     }
 
-    return this.database.import(user.id, games);
+    await this.database.import(user.id, games);
+    await Promise.all(
+      Object.keys(games).map((gameId) =>
+        this.cloudSync.pushNow(new Key(Number(gameId), user.id))
+      )
+    );
   }
 
   public async export(userId: number, gameId?: number) {
@@ -100,29 +180,53 @@ class BackendService {
   }
 
   public async getData(key: Key) {
+    await this.cloudSync.pullIfNeeded(key);
     return this.database.getData(key);
+  }
+
+  // Backs the "Copy progress from the current profile" checkbox when
+  // creating a MapGenie native profile (see common/mapgenie/nativeProfiles.ts).
+  public async copyProfileData(fromKey: Key, toKey: Key) {
+    await this.cloudSync.pullIfNeeded(fromKey);
+    const data = await this.database.getData(fromKey);
+    await this.database.setData(toKey, data);
+    this.cloudSync.schedulePush(toKey);
   }
 
   public async removeData(key: Key) {
     await this.database.removeData(key);
+    this.cloudSync.schedulePush(key);
   }
 
   public async markLocationFound(key: Key, locationId: number, found: boolean) {
     await this.database.locations.setFound(key, locationId, found);
+    this.cloudSync.schedulePush(key);
   }
 
-  public async deleteLocations(locationIds: number[]) {
-    await this.database.locations.deleteIds(locationIds);
+  public async deleteLocations(key: Key, locationIds: number[]) {
+    await this.database.locations.deleteIds(key, locationIds);
+    this.cloudSync.schedulePush(key);
   }
 
   public async trackCategory(key: Key, categoryId: number, track: boolean) {
     await this.database.categories.setTracked(key, categoryId, track);
+    this.cloudSync.schedulePush(key);
+  }
+
+  public async getCategoryFilters(key: Key) {
+    return this.database.categoryFilters.get(key);
+  }
+
+  public async setCategoryFilters(key: Key, filters: Record<number, boolean>) {
+    await this.database.categoryFilters.set(key, filters);
+    this.cloudSync.schedulePush(key);
   }
 
   public async addNote(key: Key, note: Omit<MG.Note, "id" | "created_at">) {
     const created_at = new Date().toISOString();
     const id = await this.database.notes.add(key, { ...note, created_at });
     const user_id = key.userId;
+    this.cloudSync.schedulePush(key);
     return { ...note, user_id, created_at, id };
   }
 
@@ -149,6 +253,7 @@ class BackendService {
 
         await this.reorderPresets(key, [...ordering, id]);
 
+        this.cloudSync.schedulePush(key);
         return { ...preset, order, id };
       }
     );
@@ -161,6 +266,7 @@ class BackendService {
 
   public async reorderPresets(key: Key, ordering: number[]) {
     await this.database.presetsOrdering.set(key, ordering);
+    this.cloudSync.schedulePush(key);
   }
 
   public async getBookmarks() {

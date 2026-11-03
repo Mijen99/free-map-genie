@@ -1,4 +1,5 @@
 import { ExtensionSettings } from "@/common/extension/settings";
+import { getBlockedScriptPattern } from "@/common/mapgenie/scriptUrl";
 
 import { RulesManager } from "./manager";
 import { DeclarativeNetRequestManager } from "./declarativeNetRequest";
@@ -6,6 +7,7 @@ import { WebRequestManager } from "./webRequest";
 
 export class Rules {
   private readonly manager: RulesManager = this.createManager();
+  private readonly blockedScriptRuleIds = [2, 3];
 
   constructor() {
     this.setupRules();
@@ -61,7 +63,7 @@ export class Rules {
       action: { type: "block" },
       condition: {
         requestDomains: ["cdn.mapgenie.io"],
-        urlFilter: "/js/map.js?id=*",
+        regexFilter: getBlockedScriptPattern("map"),
         resourceTypes: ["script"],
       },
     });
@@ -73,17 +75,37 @@ export class Rules {
       action: { type: "block" },
       condition: {
         requestDomains: ["cdn.mapgenie.io"],
-        urlFilter: "/js/TarkovQuestToolWidget.js?id=*",
+        regexFilter: getBlockedScriptPattern("TarkovQuestToolWidget"),
         resourceTypes: ["script"],
       },
     });
   }
 
   public async enable() {
-    await this.manager.enable([1, 2, 3]);
+    try {
+      await this.manager.disable([2, 3]);
+      await this.manager.enable([1, ...this.blockedScriptRuleIds]);
+    } catch (error) {
+      // A rules failure must not abort the background boot: MapGenie pages can
+      // still be inspected, and this message is what the popup diagnostics and
+      // the background console need to point at the real cause.
+      logger.error(
+        [
+          "Could not install the request rules, MapGenie scripts stay unblocked.",
+          "Check that the extension has site access for mapgenie.io/cdn.mapgenie.io",
+          "and that declarativeNetRequest is available (Firefox 113+ / MV3).",
+          `declarativeNetRequest=${browser.declarativeNetRequest !== undefined}`,
+        ].join(" "),
+        error
+      );
+    }
   }
 
-  public disable() {
-    return this.manager.disable([2, 3]);
+  public async disable() {
+    try {
+      await this.manager.disable([2, 3]);
+    } catch (error) {
+      logger.warn("Could not remove the request rules.", error);
+    }
   }
 }

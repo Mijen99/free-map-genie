@@ -10,6 +10,7 @@ export abstract class CustomSetting {
   public abstract get enabled(): boolean;
 
   private _loaded = false;
+  private _failed = false;
   private loadedCallbacks = new Set<() => void>();
 
   protected StorageEntry = StorageEntry;
@@ -22,15 +23,27 @@ export abstract class CustomSetting {
 
   public constructor() {
     Promise.resolve()
-      .then(() => this.init())
-      .then(() => this.applicable && this.load())
-      .then(() => {
-        this._loaded = true;
-        this.loadedCallbacks.forEach((callback) => callback());
-        this.loadedCallbacks.clear();
+      .then(async () => {
+        await this.withTimeout(
+          Promise.resolve().then(() => this.init()),
+          10000,
+          `Initializing setting "${this.label}"`
+        );
+
+        if (this.applicable) {
+          await this.withTimeout(
+            Promise.resolve().then(() => this.load()),
+            5000,
+            `Loading setting "${this.label}"`
+          );
+        }
       })
       .catch((error) => {
+        this._failed = true;
         console.error("Error initializing setting:", error);
+      })
+      .finally(() => {
+        this.markLoaded();
       });
   }
 
@@ -40,6 +53,10 @@ export abstract class CustomSetting {
 
   public get loaded(): boolean {
     return this._loaded;
+  }
+
+  public get failed(): boolean {
+    return this._failed;
   }
 
   public onLoaded(callback: () => void): void {
@@ -62,14 +79,43 @@ export abstract class CustomSetting {
     return waitForProperty(window, "mapManager");
   }
 
-  protected async waitForMapLoaded() {
+  private async waitForMapObject(timeout = 5000) {
     await this.waitForMapManager();
 
-    if (!window.mapManager!.map.loaded()) {
-      return new Promise<void>((resolve) => {
-        window.mapManager!.map.on("load", () => resolve());
-      });
+    const deadline = Date.now() + timeout;
+    while (!window.mapManager?.map && Date.now() < deadline) {
+      await new Promise((resolve) => window.setTimeout(resolve, 100));
     }
+
+    return window.mapManager?.map ?? null;
+  }
+
+  protected async waitForMapLoaded() {
+    const map = await this.waitForMapObject();
+
+    if (!map) {
+      logger.warn("MapGenie map object was not available before timeout.");
+      return;
+    }
+
+    if (typeof map.loaded === "function" && map.loaded()) {
+      return;
+    }
+
+    if (typeof map.on !== "function") {
+      return;
+    }
+
+    return this.withTimeout(
+      new Promise<void>((resolve) => {
+        map.on("load", () => resolve());
+        map.on("idle", () => resolve());
+      }),
+      5000,
+      "Waiting for MapGenie map load"
+    ).catch((error) => {
+      logger.warn("Map load event did not arrive before timeout.", error);
+    });
   }
 
   protected async waitForStore() {
@@ -87,5 +133,34 @@ export abstract class CustomSetting {
   protected async waitForGameId() {
     await waitForProperty(window, "game");
     return window.game!.id;
+  }
+
+  private markLoaded() {
+    this._loaded = true;
+    this.loadedCallbacks.forEach((callback) => callback());
+    this.loadedCallbacks.clear();
+  }
+
+  private async withTimeout<T>(
+    promise: Promise<T>,
+    timeout: number,
+    message: string
+  ) {
+    let handle: number | undefined;
+
+    const timeoutPromise = new Promise<never>((_resolve, reject) => {
+      handle = window.setTimeout(
+        () => reject(new Error(`${message} timed out after ${timeout}ms.`)),
+        timeout
+      );
+    });
+
+    try {
+      return await Promise.race([promise, timeoutPromise]);
+    } finally {
+      if (handle !== undefined) {
+        window.clearTimeout(handle);
+      }
+    }
   }
 }

@@ -22,6 +22,10 @@ export class DexieDatabase implements Database {
     return this.repositories.categories;
   }
 
+  public get categoryFilters() {
+    return this.repositories.categoryFilters;
+  }
+
   public get presets() {
     return this.repositories.presets;
   }
@@ -155,22 +159,6 @@ export class DexieDatabase implements Database {
         }
       }
     );
-  }
-
-  public async importMapgenie(key: Key, user: MG.Api.UserFull) {
-    const locations = Object.fromEntries(
-      user.locations.map((locId) => [locId, true])
-    );
-    const trackedCategoryIds = user.tracked_category_ids;
-    const notes = user.notes;
-
-    await this.setData(key, {
-      locations,
-      trackedCategoryIds,
-      notes,
-      presetOrdering: [],
-      presets: [],
-    });
   }
 
   public async export(userId: number, gameId?: number) {

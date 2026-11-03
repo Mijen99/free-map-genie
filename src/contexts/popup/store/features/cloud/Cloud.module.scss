@@ -1,0 +1,109 @@
+.cloud {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+
+  .status {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 0.75rem;
+    max-width: 100%;
+    overflow: hidden;
+    background-color: var(--background-darker);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+
+    .icon {
+      font-size: 1.25rem;
+    }
+
+    .email {
+      flex: 1;
+      // A hard cap rather than relying on flex-shrink/min-width alone:
+      // this sits inside several nested flex containers (Loading, Tabs)
+      // that don't all set min-width: 0, so a long unbroken email can
+      // still force the whole popup wider without one. Ellipsis is fine
+      // either way, so an explicit cap is simpler than chasing every
+      // ancestor's flex sizing.
+      max-width: 220px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 0.9rem;
+    }
+
+    .signOutBtn {
+      flex: 0 0 auto;
+      width: 2rem;
+      height: 2rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0;
+      background: transparent;
+      border-radius: 6px;
+
+      .icon {
+        font-size: 1.1rem;
+        opacity: 0.7;
+        transition: opacity 150ms ease;
+      }
+
+      &:not(:disabled):hover {
+        background: var(--item-red);
+
+        .icon {
+          opacity: 1;
+          color: var(--item-red-color);
+        }
+      }
+    }
+  }
+
+  .form {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+
+    input {
+      padding: 0.5rem 0.75rem;
+      background-color: var(--background-darker);
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      color: inherit;
+      font: inherit;
+
+      &:focus {
+        outline: 1px solid var(--item-hover);
+      }
+    }
+
+    .actions {
+      display: flex;
+      gap: 8px;
+
+      button {
+        flex: 1;
+      }
+    }
+  }
+
+  .btn {
+    width: 100%;
+    display: flex;
+    justify-content: center;
+    gap: 10px;
+    padding: 0.5rem 1rem;
+
+    .icon {
+      font-size: 1rem;
+    }
+  }
+
+  .hint {
+    font-size: 0.8rem;
+    opacity: 0.7;
+    text-align: center;
+  }
+}

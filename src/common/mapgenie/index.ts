@@ -1,9 +1,15 @@
 import { waitForBody } from "@/common/dom";
+import {
+  getReadyScriptUrl,
+  isMapgenieScript,
+  type MapgenieScriptName,
+} from "./scriptUrl";
 
 export { default as MapgenieAdBlocker } from "./ads";
 
 export * from "./page";
 export * from "./links";
+export * from "./nativeProfiles";
 export * as mapDataUtils from "./data";
 
 /**
@@ -12,20 +18,34 @@ export * as mapDataUtils from "./data";
  * We simply append ready to the script URL and re-insert it into the DOM.
  * The background script will allow it to load this time.
  */
-export const activateBlockedMapgenieScript = async (name: string) => {
+export const activateBlockedMapgenieScript = async (name: MapgenieScriptName) => {
   await waitForBody();
 
-  const $ogScript = $(
-    `script[src^="https://cdn.mapgenie.io/js/${name}.js?id="]`
-  );
+  const ogScript = Array.from(
+    document.querySelectorAll<HTMLScriptElement>("script[src]")
+  ).find((script) => isMapgenieScript(script.src, name));
 
-  if ($ogScript.length === 0) {
+  if (!ogScript) {
     return false;
   }
 
-  const src = $ogScript.attr("src")!.replace("id=", "ready&id=");
+  const src = getReadyScriptUrl(ogScript.src);
 
-  $(`<script/>`, { src }).appendTo("body");
+  await new Promise<void>((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = src;
+    script.async = false;
+    script.addEventListener("load", () => resolve(), { once: true });
+    script.addEventListener(
+      "error",
+      () => reject(new Error(`Failed to load MapGenie script: ${src}`)),
+      { once: true }
+    );
+
+    document.body.appendChild(script);
+  });
+
+  return true;
 };
 
 export const getAuthToken = () => {

@@ -2,7 +2,7 @@ import { BasePage } from "./base";
 
 import type { Page } from "@playwright/test";
 import type { AxiosResponse } from "axios";
-import type { UserData } from "@src/common/storage";
+import type { UserData } from "../../src/common/storage";
 
 export class AxiosClient {
   constructor(private readonly page: Page) {}
@@ -48,7 +48,7 @@ export class AxiosPage extends BasePage {
     return this.page.waitForFunction(
       "!!window.axios?.interceptors.request.handlers.length",
       undefined,
-      { timeout: 10000 }
+      { timeout: 20000 }
     );
   }
 
@@ -61,5 +61,40 @@ export class AxiosPage extends BasePage {
 
       return { locations, trackedCategoryIds, notes, presets, presetOrdering };
     });
+  }
+
+  // Saved locations as stored by the extension, for every map of the game.
+  // The map itself only shows the ones that belong to it. Null on sites where
+  // the extension's storage isn't reachable from the page.
+  public async getStoredLocations(gameId: number, userId: number) {
+    return this.page.evaluate(
+      async ({ gameId, userId }) => {
+        const db = await new Promise<IDBDatabase>((resolve, reject) => {
+          const req = indexedDB.open("fmg:database");
+          req.onsuccess = () => resolve(req.result);
+          req.onerror = () => reject(req.error);
+        });
+        // The extension's storage lives on mapgenie.io only.
+        if (!db.objectStoreNames.contains("locations_v2")) {
+          db.close();
+          return null;
+        }
+        const rows = await new Promise<any[]>((resolve, reject) => {
+          const req = db
+            .transaction("locations_v2")
+            .objectStore("locations_v2")
+            .getAll();
+          req.onsuccess = () => resolve(req.result);
+          req.onerror = () => reject(req.error);
+        });
+        db.close();
+        return Object.fromEntries(
+          rows
+            .filter((r) => r.game_id === gameId && r.user_id === userId)
+            .map((r) => [String(r.id), true])
+        );
+      },
+      { gameId, userId }
+    );
   }
 }

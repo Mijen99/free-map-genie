@@ -2,9 +2,9 @@
   "name": "fmg",
   "description": "Enhance mapgenie.io features.",
   "private": true,
-  "version": "3.0.0",
-  "author": "V1P3R",
-  "homepage": "https://github.com/V1P3R-FMG/free-map-genie",
+  "version": "3.0.22",
+  "author": "Vata74",
+  "homepage": "https://github.com/Vata74/free-map-genie-cloud",
   "type": "module",
   "scripts": {
     "dev": "wxt",
@@ -17,7 +17,9 @@
     "zip:all": "run-p zip zip:firefox",
     "compile": "tsc --noEmit",
     "postinstall": "wxt prepare",
-    "e2e": "playwright test"
+    "e2e": "playwright test",
+    "sign:firefox": "node tools/sign-firefox.mjs",
+    "release:pack": "yarn zip && yarn zip:firefox"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
@@ -28,6 +30,7 @@
     "axios-cache-interceptor": "^1.11.2",
     "clsx": "^2.1.1",
     "dexie": "^4.2.1",
+    "firebase": "^12.18.0",
     "is-mobile": "^5.0.0",
     "jquery": "^3.7.1",
     "lazy-get-decorator": "^3.0.0",
@@ -58,7 +61,6 @@
     "dotenv": "^17.2.3",
     "express": "^5.2.1",
     "fantasticon": "^1.2.3",
-    "file-system-cache": "^3.0.0-alpha.8",
     "playwright-network-cache": "^0.2.2",
     "playwright-webextext": "^0.0.4",
     "terser": "^5.44.1",

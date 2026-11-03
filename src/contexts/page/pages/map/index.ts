@@ -6,105 +6,410 @@ import { activateBlockedMapgenieScript } from "@/common/mapgenie";
 import { mapDataUtils } from "@/common/mapgenie";
 import { waitForProperty } from "@/common/object";
 
-import { fixMapLinks } from "@/common/mapgenie";
+import {
+  fixMapLinks,
+  getNativeProfiles,
+  getActiveNativeProfileId,
+} from "@/common/mapgenie";
 import { LazyGetter } from "lazy-get-decorator";
+import { showMapLoadError, showProMarkersNotice } from "@/common/mapgenie/mapLoadError";
+import { prepareMapDataResponseOverride } from "@/common/mapgenie/mapDataResponse";
+import { fetchProLocations } from "@/common/mapgenie/proMarkers";
 
 export class MapPage extends Page {
   private client = new Client();
   private ui = new UI();
+  private savedLocationsForRestore?: Record<string, boolean>;
+
+  private async withTimeout<T>(
+    promise: Promise<T>,
+    timeout: number,
+    message: string
+  ) {
+    let handle: ReturnType<typeof setTimeout> | undefined;
+
+    // Bare timers resolve to the script global in the browser and to the test
+    // global in unit tests, where `window` is only a partial stub.
+    const timeoutPromise = new Promise<never>((_resolve, reject) => {
+      handle = setTimeout(
+        () => reject(new Error(`${message} timed out after ${timeout}ms.`)),
+        timeout
+      );
+    });
+
+    try {
+      return await Promise.race([promise, timeoutPromise]);
+    } finally {
+      if (handle !== undefined) {
+        clearTimeout(handle);
+      }
+    }
+  }
 
   private async setupUser() {
-    if (!window.user) return;
+    const user = window.user;
+    if (!user) return;
 
-    // Get the active user from the backend
-    const activeUserId = await this.client.getActiveUserId();
-
-    // Update the user
-    window.user.realId = window.user.id;
-    window.user.id = activeUserId ?? window.user.id;
-    window.user!.hasPro = true;
+    user.realId = user.id;
+    window.isPro = true;
+    user.hasPro = true;
 
     window.mapData!.maxMarkedLocations = Infinity;
+
+    try {
+      const activeUserId = await this.withTimeout(
+        this.client.getActiveUserId(),
+        5000,
+        "Active FMG profile lookup"
+      );
+
+      user.id = activeUserId ?? user.id;
+    } catch (err) {
+      logger.warn("Could not load active FMG profile before map boot.", err);
+    }
+  }
+
+  // Restores which MapGenie native profile (see
+  // common/mapgenie/nativeProfiles.ts) was active, if any, before
+  // Key.fromWindow() gets called - the real account never learns about
+  // these profiles, so MapGenie's own bootstrap always reports the default
+  // one instead.
+  private restoreActiveNativeProfile() {
+    if (!window.user || !window.game) return;
+
+    const realUserId = window.user.realId ?? window.user.id;
+    const activeId = getActiveNativeProfileId(window.game.id, realUserId);
+    if (activeId !== null) {
+      window.user.activeProfileId = activeId;
+    }
+  }
+
+  private getTrackedCategoryIdsForCurrentMap(categoryIds: number[]) {
+    const categories = window.mapData?.categories ?? {};
+    const availableCategoryIds = new Set(
+      Object.keys(categories).map((id) => Number(id))
+    );
+
+    const filteredCategoryIds = categoryIds.filter((id) =>
+      availableCategoryIds.has(id)
+    );
+
+    if (filteredCategoryIds.length !== categoryIds.length) {
+      const ignoredCategoryIds = categoryIds.filter(
+        (id) => !availableCategoryIds.has(id)
+      );
+      logger.warn(
+        "Ignoring tracked categories that are not available on the current map.",
+        ignoredCategoryIds
+      );
+    }
+
+    return filteredCategoryIds;
+  }
+
+  private filterTrackedCategoriesForCurrentMap() {
+    if (!window.user) return;
+
+    window.user.trackedCategoryIds = this.getTrackedCategoryIdsForCurrentMap(
+      window.user.trackedCategoryIds ?? []
+    );
   }
 
   private async loadUserData() {
-    if (!window.user || !window.mapData) return;
-
     await this.client.migrate();
     const data = await this.client.getData();
 
-    // Be defensive about every field below. The page's map data and the
-    // backend response can both be partially populated (e.g. a fresh free
-    // account whose user.locations is null). A thrown TypeError here would leave
-    // window.user.locations unset, which makes map.js crash on boot ("Cannot
-    // convert undefined or null to object") and silently breaks marking.
-    const currentMapId = window.mapData.map?.id;
+    // The initial page can omit markers until its asynchronous map-data request.
+    // Keep the full save for restoration once the runtime map is ready.
+    this.savedLocationsForRestore = { ...data.locations };
 
-    // Scope the saved found-locations to the current map. The backend stores
-    // them per game (across every map of the game), so they must be filtered to
-    // this map or the "found" counter leaks in locations from the game's other
-    // maps (and other games). The page used to embed window.mapData.locations
-    // we could filter against, but Map Genie now loads it dynamically for
-    // logged-in users (it's usually empty here), so we resolve the map's
-    // location ids from the API in that case.
-    const mapLocations = window.mapData.locations ?? [];
-    const mapLocationIds =
-      mapLocations.length > 0
-        ? new Set(mapLocations.map((loc) => loc.id))
-        : currentMapId != null
-          ? await this.client
-              .getMapLocationIds(currentMapId)
-              .catch(() => new Set<number>())
-          : new Set<number>();
+    const pageLocations = window.mapData!.locations ?? [];
+    const locationsById = Object.fromEntries(
+      pageLocations.map((loc) => [loc.id, loc])
+    );
 
     const filteredLocations = Object.fromEntries(
-      Object.keys(data.locations ?? {})
-        .filter((id) => mapLocationIds.has(Number(id)))
+      Object.keys(data.locations)
+        .filter((id) => data.locations[Number(id)] && !!locationsById[id])
         .map((id) => [id, true])
     );
 
-    const filteredNotes = (data.notes ?? []).filter(
-      (note) => note.map_id === currentMapId
+    const filteredNotes = data.notes.filter(
+      (note) => note.map_id === window.mapData!.map.id
     );
 
-    window.user.locations = filteredLocations;
-    window.user.trackedCategoryIds = data.trackedCategoryIds ?? [];
+    window.user!.locations = filteredLocations;
+    window.user!.trackedCategoryIds = this.getTrackedCategoryIdsForCurrentMap(
+      data.trackedCategoryIds
+    );
 
-    window.mapData.notes = filteredNotes;
-    window.mapData.presets = data.presets ?? [];
+    window.mapData!.notes = filteredNotes;
+    window.mapData!.presets = data.presets;
+
+    logger.log(
+      `Loaded ${Object.keys(filteredLocations).length} saved FMG locations.`
+    );
+  }
+
+  private getSavedLocationIdsForCurrentMap() {
+    const saved = this.savedLocationsForRestore ?? window.user?.locations ?? {};
+    const savedLocationIds = Object.keys(saved)
+      .filter((id) => saved[id])
+      .map(Number);
+
+    const mapState = window.store?.getState().map;
+    const stateLocations = mapState?.locationsById ?? mapState?.locationById;
+
+    const currentMapLocationIds =
+      stateLocations != null
+        ? Object.keys(stateLocations).map(Number)
+        : (window.mapData?.locations ?? []).map((loc) => loc.id);
+
+    if (currentMapLocationIds.length === 0) return [];
+
+    const currentMapLocationIdsSet = new Set(currentMapLocationIds);
+    return savedLocationIds.filter((id) => currentMapLocationIdsSet.has(id));
+  }
+
+  private async waitForMapObject(timeout = 5000) {
+    await waitForProperty(window, "mapManager", timeout);
+
+    const deadline = Date.now() + timeout;
+    while (!window.mapManager?.map && Date.now() < deadline) {
+      await new Promise((resolve) => window.setTimeout(resolve, 100));
+    }
+
+    return window.mapManager?.map ?? null;
+  }
+
+  private async waitForMapStyle(timeout = 30000) {
+    const map = await this.waitForMapObject(timeout);
+    if (!map) throw new Error("MapGenie map object is not ready.");
+
+    if (typeof map.loaded === "function" && map.loaded()) {
+      return;
+    }
+
+    if (typeof map.on !== "function") {
+      return;
+    }
+
+    let onReady: () => void = () => {};
+    const ready = new Promise<void>((resolve) => {
+      onReady = resolve;
+      map.on("load", onReady);
+      map.on("idle", onReady);
+    });
+    try {
+      await this.withTimeout(ready, timeout, "Waiting for MapGenie map style");
+    } finally {
+      map.off("load", onReady);
+      map.off("idle", onReady);
+    }
+  }
+
+  private async updateFoundLocationsStyle() {
+    try {
+      window.mapManager?.updateFoundLocationsStyle();
+      return;
+    } catch (err) {
+      logger.warn(
+        "Could not update found location style immediately; retrying after map load.",
+        err
+      );
+    }
+
+    try {
+      await this.waitForMapStyle();
+      window.mapManager?.updateFoundLocationsStyle();
+    } catch (err) {
+      logger.warn("Could not update found location style after retry.", err);
+    }
+  }
+
+  private async syncSavedLocationsToMap() {
+    try {
+      await this.waitForMapStyle();
+    } catch (err) {
+      logger.warn("Could not restore saved marker styles before map load.", err);
+      return;
+    }
+
+    const store = window.store;
+    if (!store) return;
+
+    const locationIds = this.getSavedLocationIdsForCurrentMap();
+    const state = store.getState();
+    const foundLocations = state.user.foundLocations ?? {};
+    const missingLocationIds = locationIds.filter(
+      (id) => !foundLocations[id]
+    );
+
+    if (missingLocationIds.length > 0) {
+      store.dispatch({
+        type: "MG:USER:MARK_LOCATIONS",
+        meta: {
+          locationIds: missingLocationIds,
+          found: true,
+        },
+      } as any);
+    }
+
+    // Update the locked object only after dispatch: Redux may share this object,
+    // and pre-populating it would suppress the counter update for restored IDs.
+    if (this.savedLocationsForRestore && window.user) {
+      for (const id of Object.keys(window.user.locations)) {
+        delete window.user.locations[id];
+      }
+      for (const id of locationIds) window.user.locations[id] = true;
+      this.savedLocationsForRestore = undefined;
+    }
+    if (locationIds.length === 0) return;
+
+    // Redux counters and MapLibre feature states are separate. Reapply every
+    // saved marker visually, even when Redux already counted it during boot.
+    try {
+      for (const id of locationIds) {
+        window.mapManager!.setLocationFound(id, true);
+      }
+      await this.updateFoundLocationsStyle();
+    } catch (err) {
+      logger.warn("Could not restore saved marker styles.", err);
+    }
+
+    logger.log(
+      `Synced ${locationIds.length} saved FMG locations to the map` +
+        ` (${missingLocationIds.length} newly marked).`
+    );
+  }
+
+  private lockValue(obj: object, key: PropertyKey, value: unknown) {
+    Object.defineProperty(obj, key, {
+      configurable: true,
+      enumerable: true,
+      get: () => value,
+      set: () => {},
+    });
+  }
+
+  private lockProData() {
+    if (window.user) {
+      this.lockValue(window, "isPro", true);
+      this.lockValue(window.user, "hasPro", true);
+      this.lockValue(window.user, "locations", window.user.locations);
+      this.lockValue(
+        window.user,
+        "trackedCategoryIds",
+        window.user.trackedCategoryIds
+      );
+
+      // Merge in any locally-created "Map profiles" (see
+      // common/mapgenie/nativeProfiles.ts) so they survive a reload instead
+      // of only existing in the page's in-memory state until now. Scoped by
+      // the real account id, not this.client.key.userId - that one may
+      // already be a native profile's own id by this point.
+      try {
+        if (window.game) {
+          const realUserId = window.user.realId ?? window.user.id;
+          const localProfiles = getNativeProfiles(window.game.id, realUserId);
+          if (localProfiles.length > 0) {
+            const existingIds = new Set(
+              (window.user.profiles ?? []).map((p) => p.id)
+            );
+            window.user.profiles = [
+              ...(window.user.profiles ?? []),
+              ...localProfiles.filter((p) => !existingIds.has(p.id)),
+            ];
+          }
+        }
+      } catch (err) {
+        logger.debug("Could not merge local map profiles.", err);
+      }
+      this.lockValue(window.user, "profiles", window.user.profiles);
+      this.lockValue(
+        window.user,
+        "activeProfileId",
+        window.user.activeProfileId ?? null
+      );
+    }
+
+    if (window.mapData) {
+      this.lockValue(window.mapData, "maxMarkedLocations", Infinity);
+      this.lockValue(window.mapData, "notes", window.mapData.notes);
+      this.lockValue(window.mapData, "presets", window.mapData.presets);
+    }
   }
 
   private async unlockMapLinks() {
-    await fixMapLinks(this.client.mapgenie);
+    try {
+      // This is a cosmetic link rewrite that needs a backend round trip. It must
+      // never hold the boot: on Firefox the call waits for the backend service to
+      // answer, and a slow or missing responder used to stall the map forever
+      // because the map script is only replayed after this returns.
+      await this.withTimeout(
+        fixMapLinks(this.client.mapgenie),
+        8000,
+        "Map link unlock"
+      );
+    } catch (err) {
+      logger.error("Failed to unlock map links, loading map anyway.", err);
+    }
   }
 
   @LazyGetter()
   private get fmgMapId() {
     const urlParams = new URLSearchParams(window.location.search);
-    const mapIdParmam = urlParams.get("fmgMapId") ?? undefined;
-    return mapIdParmam ? Number(mapIdParmam) : null;
+    const value = urlParams.get("fmgMapId");
+    if (value === null) return null;
+    const mapId = Number(value);
+    if (!Number.isSafeInteger(mapId) || mapId <= 0) {
+      throw new Error("Invalid requested map ID.");
+    }
+    return mapId;
   }
 
-  @LazyGetter()
-  private get hasProCategoryLocations() {
-    const proCategoryLocationCounts = window.mapData!.proCategoryLocationCounts;
-    for (const key in proCategoryLocationCounts) {
-      const count = proCategoryLocationCounts[key];
-      if (count > 0) return true;
+  /**
+   * Premium markers are fetched here, in the page context, because a Firefox
+   * content script has no cross-origin access to the IGN API without an opt-in
+   * host permission, while page-origin requests are CORS-allowed. The service
+   * falls back to its own request when this returns nothing.
+   */
+  private async loadProLocationsForMap(mapId: number) {
+    try {
+      const info = await this.client.mapgenie.fetchMapInfo(mapId);
+      if (!(info.locations_count > 0) || !info.ign_slug) return undefined;
+      const locations = await fetchProLocations({
+        objectSlug: info.ign_slug,
+        mapSlug: info.slug,
+        mapId,
+      });
+      logger.log(`Fetched ${locations.length} premium markers in the page context.`);
+      return locations;
+    } catch (err) {
+      logger.warn(
+        "Could not fetch premium markers in the page context; falling back to the backend request.",
+        err
+      );
+      return undefined;
     }
-    return false;
   }
 
   private async loadMapDataForMapId(mapId: number) {
-    const game = await this.client.mapgenie.fetchGame(window.game!.id);
-    const map = game.maps.find((m) => m.id === mapId);
-
-    if (!map) {
-      logger.warn(`Map with ID ${mapId} not found in game ${game.title}`);
-      return;
+    const proLocations = await this.loadProLocationsForMap(mapId);
+    const map = await this.client.mapgenie.fetchMap(mapId, proLocations);
+    const gameId = window.game?.id ?? window.mapData?.map.game_id;
+    if (map.id !== mapId || map.game_id !== gameId) {
+      throw new Error("Requested map does not belong to this game's page.");
     }
-
-    mapDataUtils.loadMapData(map);
+    mapDataUtils.loadMapData(map, {
+      preserveMapConfig: mapId === window.mapData?.map.id,
+      swapTileCoordinates: mapDataUtils.getStoredTileCoordinateSwap(
+        map.game_id,
+        map.id
+      ),
+    });
+    prepareMapDataResponseOverride(mapId, window.mapData!.locations);
+    if (map.markersUnavailable) showProMarkersNotice();
   }
 
   private async loadMapData() {
@@ -112,16 +417,12 @@ export class MapPage extends Page {
 
     if (this.fmgMapId !== null) {
       await this.loadMapDataForMapId(this.fmgMapId);
-      return;
-    }
-
-    if (this.hasProCategoryLocations) {
-      await this.loadMapDataForMapId(window.mapData!.map.id);
     }
   }
 
   private async loadHeatmaps() {
     if (!window.mapData?.heatmapGroups) return;
+    if (this.fmgMapId === null) return;
 
     const hasHeatmaps = window.mapData.heatmapGroups.length > 0;
     if (!hasHeatmaps) return;
@@ -131,6 +432,23 @@ export class MapPage extends Page {
     );
 
     mapDataUtils.loadHeatmaps(heatmaps);
+  }
+
+  private async loadRemoteMapData() {
+    try {
+      // fetchMap is a backend round trip; bound it so a silent responder cannot
+      // keep the map script from ever being replayed.
+      await this.withTimeout(this.loadMapData(), 20000, "Remote map data loading");
+    } catch (err) {
+      // Never label the original page's map as a successfully loaded target.
+      showMapLoadError();
+      throw err;
+    }
+    try {
+      await this.loadHeatmaps();
+    } catch (err) {
+      logger.warn("Could not load optional heatmaps; continuing with the requested map.", err);
+    }
   }
 
   private setupEventListeners() {
@@ -166,54 +484,6 @@ export class MapPage extends Page {
     }
   }
 
-  /**
-   * Pin the two scalar pro flags so they survive Map Genie's map.js boot.
-   *
-   * After we re-inject the blocked map.js it boots and re-syncs the user from
-   * GET /api/v1/user/map-data/{mapId}. Most of that re-sync (found locations,
-   * tracked categories, notes, presets) is already handled by answering that
-   * request with FMG's data, see installMapDataResyncInterceptor in client.ts.
-   * The two flags below gate the pro behaviour and are cheap, read-mostly
-   * values, so we pin them here as well, as a safety net in case answering the
-   * map-data request ever falls back to the server:
-   *
-   *   window.user.hasPro                -> true      canMarkLocation() reads it
-   *                                                  live, false re-locks the cap
-   *                                                  and stops marking
-   *   window.mapData.maxMarkedLocations -> Infinity  removes the free-user cap
-   *
-   * They are defined as getters with a no-op setter so map.js's re-sync
-   * assignment is silently ignored. A plain read-only property would throw
-   * instead, because map.js runs in strict mode.
-   *
-   * Only these two scalars are pinned. We deliberately do not trap the data
-   * collections (locations, trackedCategoryIds, notes, presets): trapping those
-   * made the v3 React UI misbehave, so they are kept correct through the
-   * map-data interceptor instead.
-   */
-  private lockProUnlock() {
-    if (window.user) {
-      this.lockValue(window.user, "hasPro", true);
-    }
-
-    if (window.mapData) {
-      this.lockValue(window.mapData, "maxMarkedLocations", Infinity);
-    }
-  }
-
-  /**
-   * Define `obj[key]` as a getter that always returns `value`, with a no-op
-   * setter so a later assignment is silently ignored instead of throwing.
-   */
-  private lockValue(obj: object, key: PropertyKey, value: unknown) {
-    Object.defineProperty(obj, key, {
-      configurable: true,
-      enumerable: true,
-      get: () => value,
-      set: () => {},
-    });
-  }
-
   private async login() {
     await waitForProperty(window, "mapManager");
 
@@ -228,38 +498,85 @@ export class MapPage extends Page {
     }
   }
 
-  public async start() {
-    await waitForProperty(window, "mapData");
+  private async activateMapScript() {
+    if (window.mapManager) return;
 
-    // Enrich the page with pro data. Every step here is best-effort: a failure
-    // (e.g. the Map Genie data API rejecting a missing/expired X-Api-Secret)
-    // must only be logged, never thrown. Otherwise it would abort start()
-    // before activateBlockedMapgenieScript() re-injects the blocked map.js and
-    // the map would never render. On failure we fall back to the page's
-    // original map data.
-    try {
-      await this.setupUser();
+    // `/js/map.` skips maplibre.*.js, which also contains "js/map".
+    const tagCount = document.querySelectorAll(
+      'script[src*="cdn.mapgenie.io/js/map."]'
+    ).length;
 
-      // Load map data and heatmaps for pro maps and maps with heatmaps
-      await this.loadMapData();
-      await this.loadHeatmaps();
-
-      // Overwrite some game config options
-      if (window.config) {
-        window.config.proOnlyMedia = false;
-        window.config.checklistEnabled = true;
-        window.config.presetsEnabled = true;
-        window.config.iconSizeToggleEnabled = true;
-      }
-
-      // Unlock pro map links
-      await this.unlockMapLinks();
-    } catch (err) {
-      logger.error("Failed to set up pro map, loading map anyway.", err);
+    const activated = await activateBlockedMapgenieScript("map");
+    if (!activated) {
+      // No script tag to replay: the page either never requested map.js or the
+      // tag was removed. Nothing else in the boot flow can recover this.
+      logger.error(
+        `MapGenie map script tag not found (tags=${tagCount}); the map cannot boot.`
+      );
+      showMapLoadError();
+      return;
     }
 
+    try {
+      await waitForProperty(window, "mapManager", 15000);
+      logger.log("MapGenie map script started.", { tagCount });
+    } catch (error) {
+      // The replayed URL was fetched but never produced a runtime: an ad blocker
+      // or tracker protection is the usual cause, since the same request is
+      // already being rewritten by declarativeNetRequest.
+      logger.error(
+        `MapGenie map script did not start (tags=${tagCount}). ` +
+          "Check the network panel for a blocked cdn.mapgenie.io/js/map request " +
+          "and allow mapgenie.io in content blockers.",
+        error
+      );
+      showMapLoadError();
+    }
+  }
+
+  private async installRequestInterceptor() {
+    try {
+      await this.withTimeout(
+        this.client.installInterceptor(),
+        10000,
+        "FMG request interceptor installation"
+      );
+    } catch (err) {
+      logger.error("Failed to install FMG request interceptor.", err);
+    }
+  }
+
+  public async start() {
+    await waitForProperty(window, "mapData");
+    logger.log("Map boot: page data ready.");
+
+    await this.setupUser();
+    this.restoreActiveNativeProfile();
+    logger.log("Map boot: user state ready.");
+
+    // Load map data and heatmaps for pro maps and maps with heatmaps
+    await this.loadRemoteMapData();
+    logger.log("Map boot: remote map data handled.");
+
+    // MapGenie stores tracked categories per game. Only pass categories that
+    // exist on this map or its map script may fail during initialization.
+    this.filterTrackedCategoriesForCurrentMap();
+
+    // Overwrite some game config options
+    if (window.config) {
+      window.config.proOnlyMedia = false;
+      window.config.checklistEnabled = true;
+      window.config.presetsEnabled = true;
+      window.config.iconSizeToggleEnabled = true;
+    }
+
+    // Unlock pro map links
+    await this.unlockMapLinks();
+    logger.log("Map boot: map links handled.");
+
     if (!window.user) {
-      await activateBlockedMapgenieScript("map");
+      logger.log("Map boot: replaying the map script (signed out).");
+      await this.activateMapScript();
 
       // In development mode, auto-login and load map data to speed up testing
       if (import.meta.env.DEV) {
@@ -269,43 +586,44 @@ export class MapPage extends Page {
       return;
     }
 
-    // Login client from map data. Kept outside the best-effort block below so
-    // the request interceptor can register its handlers even if loading the
-    // saved user data fails.
-    this.client.loginFromMap();
-
-    // Best-effort: load the logged-in user's saved data. Like the block above
-    // this must never abort start() before map.js is re-injected.
     try {
-      // Request persistend storage
-      await this.client.storageRequestPersist();
+      await this.withTimeout(
+        (async () => {
+          // Request persistend storage
+          await this.client.storageRequestPersist();
 
-      // Load user data
-      await this.loadUserData();
+          // Login client from map data
+          this.client.loginFromMap();
 
-      // Fix alt map sdk if needed
-      this.fixAltMapSdk();
+          // Load user data
+          await this.loadUserData();
+        })(),
+        5000,
+        "FMG user data loading"
+      );
     } catch (err) {
-      logger.error("Failed to load user map data, loading map anyway.", err);
+      logger.error("Failed to load FMG user data, loading map anyway.", err);
     }
 
-    // Pin the pro flags right before map.js boots, so its boot-time re-sync
-    // (GET /api/v1/user/map-data/{mapId}) can't flip hasPro back to false and
-    // re-lock the free-user cap. Without this, map.js treats the user as free
-    // and stops sending mark/track requests, so nothing gets saved.
-    this.lockProUnlock();
+    // Fix alt map sdk if needed
+    this.fixAltMapSdk();
 
-    // Answer map.js's boot re-sync (GET /api/v1/user/map-data/{mapId}) at the
-    // XMLHttpRequest layer with FMG's data, so it re-applies our found locations
-    // and pro state instead of the server's free-account data. map.js makes this
-    // request through its own bundled axios rather than window.axios, so the
-    // AxiosInterceptor cannot see it. That is why this hooks at the XHR level.
-    this.client.installMapDataResyncInterceptor();
+    this.lockProData();
 
-    await activateBlockedMapgenieScript("map");
+    logger.log("Map boot: replaying the map script.");
+    await this.activateMapScript();
 
+    // Must be registered before the interceptor goes live: installRequestInterceptor()
+    // is what lets a marked-location PUT reach the Client and emit "locationMarked"
+    // internally, and that emit only reaches whichever listeners are already
+    // registered at that moment. Registering this after installing the interceptor
+    // left a window where an early mark's event had nothing to forward it to window,
+    // and was silently lost.
     this.setupEventListeners();
-    await this.client.installInterceptor();
+
+    await this.installRequestInterceptor();
+    await this.syncSavedLocationsToMap();
+
     await this.ui.mount();
 
     // Restore fmgMapId param on pro maps

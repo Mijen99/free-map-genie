@@ -49,6 +49,8 @@ declare namespace MG {
     trackedCategoryIds: number[];
     // presets: MG.Preset[];
     suggestions: unknown[];
+    profiles?: { id: number; name: string }[];
+    activeProfileId?: number | null;
   }
 
   declare interface Game {
@@ -70,6 +72,7 @@ declare namespace MG {
 
   declare interface Map {
     id: Int;
+    game_id?: Int;
     slug: string;
     title: string;
   }

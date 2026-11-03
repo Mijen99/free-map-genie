@@ -1,0 +1,73 @@
+name: MapGenie compatibility
+
+# The main signal: does the extension still work against the real
+# mapgenie.io site. Runs daily, plus on demand. Separate from the cloud
+# sync workflow on purpose, so a cloud-only problem never makes this badge
+# (the one that actually means "is the extension broken") read red.
+
+on:
+  schedule:
+    - cron: "17 7 * * *" # once a day
+  workflow_dispatch: {} # lets us trigger it manually too, from the Actions tab
+
+jobs:
+  compat-check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # to commit the README status table
+    timeout-minutes: 45 # 4 whole attempts of ~6 min each must fit, or the job is cancelled and the README table is never updated
+
+    env:
+      PLAYWRIGHT_JSON_OUTPUT_NAME: ci-results/compat.json
+      MG_EMAIL: ${{ secrets.MG_EMAIL }}
+      MG_PASSWORD: ${{ secrets.MG_PASSWORD }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm install --legacy-peer-deps
+
+      # Before the unit tests: some of them (the guide ones) run in a real
+      # Firefox page.
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium firefox
+
+      - name: Unit tests (map.js compatibility layer)
+        run: node --test tests/*.test.mjs
+
+      - name: Build the extension
+        run: npm run build
+
+      # mapgenie.io is sometimes slow/unresponsive to GitHub's shared runner
+      # IPs specifically (not reproduced from a residential connection), on
+      # top of Playwright's own per-test retries (2, set in
+      # playwright.config.ts). Retrying the whole run a few times on top of
+      # that absorbs most of that: a transient block window rarely spans
+      # three separate attempts minutes apart.
+      - name: End-to-end tests against the real site
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 10
+          max_attempts: 4
+          retry_wait_seconds: 30
+          command: npx playwright test --project=chromium e2e/tests/migration.spec.ts e2e/tests/features.spec.ts --reporter=list,json
+
+      # Runs even when the tests failed, that's the point: the README table
+      # should show which check broke.
+      - name: Update the README status table
+        if: always()
+        run: |
+          node scripts/update-readme-status.mjs ci-results/compat.json compat
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md
+          if ! git diff --cached --quiet; then
+            git commit -m "docs: update CI status table [skip ci]"
+            git pull --rebase --autostash
+            git push
+          fi
