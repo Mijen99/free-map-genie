@@ -7,8 +7,6 @@ name: Cloud sync
 # badge.
 
 on:
-  schedule:
-    - cron: "37 7 * * *" # once a day, offset from the compat-check run
   workflow_dispatch: {}
 
 jobs:

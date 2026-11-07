@@ -6,8 +6,6 @@ name: MapGenie compatibility
 # (the one that actually means "is the extension broken") read red.
 
 on:
-  schedule:
-    - cron: "17 7 * * *" # once a day
   workflow_dispatch: {} # lets us trigger it manually too, from the Actions tab
 
 jobs:
